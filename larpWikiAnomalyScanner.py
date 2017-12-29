@@ -3,8 +3,6 @@
 # Scans all wiki page sources in current directory and outputs found anomalies
 # to stdout in a human readable format.
 #
-# Requires Python 3
-#
 # Detected anomalies:
 # - Obscure code points:
 #   - Replacement code point "�".
