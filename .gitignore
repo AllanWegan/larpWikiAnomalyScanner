@@ -1,0 +1,4 @@
+# Ignore compiled Python code:
+*.pyc
+# Ignore IDE-specific stuff:
+.idea/
