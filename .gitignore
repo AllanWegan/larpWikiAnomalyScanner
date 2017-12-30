@@ -2,3 +2,4 @@
 *.pyc
 # Ignore IDE-specific stuff:
 .idea/
+backup/
