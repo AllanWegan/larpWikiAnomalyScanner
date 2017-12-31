@@ -1,49 +1,4 @@
 #!/usr/bin/env python3
-#
-# Scans all wiki page sources in configured directory and outputs found
-# anomalies to stdout in a human readable format.
-#
-# Detected anomalies:
-# - Obscure code points:
-#   - Replacement code point "�".
-#   - Marks in grapheme clusters without a leading letter.
-#   - Category C except tab.
-# - Invalid wiki directives:
-#   - Redirect in other than first line after optional leading comments.
-#   - Any non-comment non-directive after valid redirect.
-# - Old wiki tags:
-#   - <b>
-#   - <br>
-#   - <i>
-#   - <nowiki>
-#   - <pre>
-#   - <toc>
-#   - <tt>
-# - Tag case:
-#   - <<BR>>
-# - Headlines:
-#   - leading or trailing whitespace.
-#   - Open and close tags of differing length.
-#   - Level > 5.
-#   - Missing whitespace between tags and headline text.
-#   - Headlines with leading "#" or "*" in name (leftovers from old wiki).
-#   - Missing headline text (except "#" or "*").
-#   - Markup in text.
-# - Links:
-#   - Quoted internal links (failed old wiki conversion).
-#   - Old-wiki-style external links.
-#   - Old-wiki-style upload/attachment links.
-# - Lists:
-#   - Old-wiki-style bullet lists (line starts with '*')
-#   - Old-wiki-style numbered list (line starts with '#') when mixed with 
-#     bullet lists (else they look like a directive or comment).
-# - Old wiki paragraph modes:
-#   - Indenting (leading ':').
-#   - Definition list (leading ';').
-#
-# 2012-12-26 Allan Wegan <allanwegan@allanwegan.de>
-# 2017-12-30 Allan Wegan <allanwegan@allanwegan.de>
-#
 
 import re
 import glob
@@ -62,8 +17,10 @@ blacklist = (
     'HilfeZurCreoleSyntax.txt',
 )
 
-# Finds all occurences of a regular expression pattern in given :
 class ReCache:
+    """
+    Wraps re caching compiled patterns.
+    """
     cache = dict()
 
     def compile(self, pattern, flags = 0):
@@ -87,9 +44,11 @@ class ReCache:
     def sub(self, pattern, replacement, text, flags = 0):
         return self.compile(pattern, flags).sub(replacement, text)
 
-# Outputs found anomalies:
 class AnomalyOutputter:
-
+    """
+    Formats and outputs found anomalies.
+    Also counts found anomalies.
+    """
     qoute = '"'
     ellipsis = '…'
     sol = '|'
@@ -226,9 +185,10 @@ class dummyTextDecorator(AnsiTextDecorator):
     def decorateText(self, text, *codes):
         return text
 
-# Escapes non-printable code points except space (0x20) in given text:
 class TextEscaper:
-  
+    """
+    Escapes non-printable code points except space (0x20).
+    """
     def escape(self, text):
         if not len(text): return r''
         return repr(text)[1:-1].replace(r'"', r'\"')
