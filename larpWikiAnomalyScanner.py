@@ -17,33 +17,6 @@ blacklist = (
     'HilfeZurCreoleSyntax.txt',
 )
 
-class ReCache:
-    """
-    Wraps re caching compiled patterns.
-    """
-    cache = dict()
-
-    def compile(self, pattern, flags = 0):
-        cache = self.cache
-        if pattern not in cache:
-            cache[pattern] = dict()
-        cache = cache[pattern]
-        if flags not in cache:
-            cache[flags] = re.compile(pattern, flags)
-        return cache[flags]
-
-    def finditer(self, pattern, text, flags = 0):
-        return self.compile(pattern, flags).finditer(text)
-
-    def match(self, pattern, text, flags = 0):
-        return self.compile(pattern, flags).match(text)
-
-    def search(self, pattern, text, flags = 0):
-        return self.compile(pattern, flags).search(text)
-
-    def sub(self, pattern, replacement, text, flags = 0):
-        return self.compile(pattern, flags).sub(replacement, text)
-
 class AnomalyOutputter:
     """
     Formats and outputs found anomalies.
@@ -60,7 +33,7 @@ class AnomalyOutputter:
     lineCount = 0
     anomalyCount = 0
     anomalyCounts = dict()
-    lastPath = r''
+    lastPath = ''
     lastLineNr = 0
 
     def __init__(self, outputStream, textEscaper, textDecorator):
@@ -77,7 +50,7 @@ class AnomalyOutputter:
             self.lastPath = path
             self.pathCount += 1
             ePath = d.decorateText(e.escape(path), d.textBCyan)
-            pageName = os.path.basename(path).replace(r' - ', '/')
+            pageName = os.path.basename(path).replace(' - ', '/')
             if pageName[-4:] == '.txt':
                 pageName = pageName[0:-4]
             url = 'https://larpwiki.de/' + urllib.parse.quote(pageName)
@@ -122,7 +95,7 @@ class AnomalyOutputter:
             after = t[0]
             afterCpLength = t[1]
         else:
-            after = r''
+            after = ''
             afterCpLength = 0
 
         if startColumn - beforeCpLength > 0:
@@ -144,41 +117,42 @@ class AnomalyOutputter:
 # Colorizes output for ANSI terminals:
 class AnsiTextDecorator:
   
-    textBlack = r'30'
-    textRed = r'31'
-    textGreen = r'32'
-    textYellow = r'33'
-    textBlue = r'34'
-    textMagenta = r'35'
-    textCyan = r'36'
-    textGrey = r'37'
-    textBGrey = r'30;1'
-    textBRed = r'31;1'
-    textBGreen = r'32;1'
-    textBYellow = r'33;1'
-    textBBlue = r'34;1'
-    textBMagenta = r'35;1'
-    textBCyan = r'36;1'
-    textWhite = r'37;1'
-    textBold = r'1'
-    textItalic = r'3'
-    textUnderline = r'4'
-    backgroundBlack = r'40'
-    backgroundRed = r'41'
-    backgroundGreen = r'42'
-    backgroundYellow = r'43'
-    backgroundBlue = r'44'
-    backgroundMagenta = r'45'
-    backgroundCyan = r'46'
-    backgroundGrey = r'47'
+    textBlack = '30'
+    textRed = '31'
+    textGreen = '32'
+    textYellow = '33'
+    textBlue = '34'
+    textMagenta = '35'
+    textCyan = '36'
+    textGrey = '37'
+    textBGrey = '30;1'
+    textBRed = '31;1'
+    textBGreen = '32;1'
+    textBYellow = '33;1'
+    textBBlue = '34;1'
+    textBMagenta = '35;1'
+    textBCyan = '36;1'
+    textWhite = '37;1'
+    textBold = '1'
+    textItalic = '3'
+    textUnderline = '4'
+    backgroundBlack = '40'
+    backgroundRed = '41'
+    backgroundGreen = '42'
+    backgroundYellow = '43'
+    backgroundBlue = '44'
+    backgroundMagenta = '45'
+    backgroundCyan = '46'
+    backgroundGrey = '47'
 
     def decorateText(self, text, *codes):
         if not len(codes):
             return text
-        codesString = r''
+        codesString = []
         for code in codes:
-            codesString += '\x1B[' + code + r'm'
-        return codesString + text + '\x1B[0m'
+            codesString.extend(('\x1B[', code, 'm'))
+        codesString.extend((text, '\x1B[0m'))
+        return ''.join(codesString)
 
 class dummyTextDecorator(AnsiTextDecorator):
 
@@ -190,12 +164,12 @@ class TextEscaper:
     Escapes non-printable code points except space (0x20).
     """
     def escape(self, text):
-        if not len(text): return r''
-        return repr(text)[1:-1].replace(r'"', r'\"')
+        if not len(text): return ''
+        return repr(text)[1:-1].replace('"', r'\"')
 
     def escapeLimitRight(self, text, maxLength):
         if maxLength <= 0:
-            return r'', 0
+            return '', 0
         buffer = StringIO()
         length = 0
         cpCount = 0
@@ -213,7 +187,7 @@ class TextEscaper:
   
     def escapeLimitLeft(self, text, maxLength):
         if maxLength <= 0:
-            return r'', 0
+            return '', 0
         cpList = []
         length = 0
         index = len(text)
@@ -232,9 +206,361 @@ class TextEscaper:
             buffer.write(cp)
         return buffer.getvalue(), len(cpList)
 
+_detectSmilieRe = re.compile(r'''(?:^|(?<=\s))
+[:;,8B][-~]?[)}\]|({[pPD][=\#]?
+(?:\s|$)''', re.VERBOSE)
+def detectSmilie(line, offset):
+    """
+    Detects simple western LTR ASCII smilies like ";~P="
+
+    A smilie starts with a symbol for the eyes, followed by an optional symbol
+    for the nose and a symbol for the mouth.
+    A symbol for the beard may follow.
+    The smilie has to begin and end at the start/end of line or after/before
+    whitespace.
+    """
+    return _detectSmilieRe.match(line, offset) is not None
+
+def checkForInvalidCodePoints(escaper, outputter, path, lineNr, line):
+    markAllowed = False
+    for cpIndex, cp in enumerate(line):
+        anomaly = True
+        unexpectedMark = False
+        cpCat = unicodedata.category(cp)
+        cpCatMain = cpCat[0]
+
+        # Don't report letters, numbers, punctuation, symbols,
+        # whitespace and some miscategorized whitespace:
+        if cpCatMain in 'LNPSZ' or cp in (
+            '\t',
+            '\xad', # SOFT HYPHEN, category Cf
+            '\u200d', # ZERO WIDTH JOINER, category Cf
+            '\u200e', # LEFT-TO-RIGHT MARK, category Cf
+            None
+        ):
+            anomaly = False
+
+        # But report REPLACEMENT CHARACTER from category So, because
+        # it most likely is a character set conversion artifact:
+        if cp == '�':
+            anomaly = True
+
+        # Don't report marks following letters or other marks:
+        if cpCatMain == 'M':
+            if markAllowed:
+                anomaly = False
+            else:
+                # Not in letter cluster.
+                anomaly, unexpectedMark = True, True
+        elif cpCatMain == 'L':
+            markAllowed = True
+        else:
+            markAllowed = False
+
+        if anomaly:
+            cpName = unicodedata.name(cp, 'unnamed')
+            if unexpectedMark:
+                suffix = ' not preceded by a letter'
+            else:
+                suffix = ''
+            msg = 'Unicode {0} ({1}, category {2}){3}'
+            msg = msg.format(escaper.escape(cp), cpName, cpCat, suffix)
+            outputter.out(path, lineNr, cpIndex, cpIndex + 1, line, msg)
+
+_checkForUseModListRe = re.compile(r'(\*|#(\*|#([*#])))[*#]*')
+def checkForUseModList(outputter, path, lineNr, line, isDirective, isComment):
+    match = _checkForUseModListRe.match(line)
+    if match:
+        isDirective, isComment = False, False
+        start = match.start()
+        end = match.end()
+        outputter.out(path, lineNr, start, end, line, 'UseMod list')
+    return isDirective, isComment
+
+_checkForNonCommentAfterRedirectRe = re.compile(r'\s*(\S.*?)\s*$')
+def detectNonCommentAfterRedirect(outputter, path, lineNr, line):
+    match = _checkForNonCommentAfterRedirectRe.match(line)
+    if match:
+        start = match.start(1)
+        end = match.end(1)
+        msg = 'Non-empty non-comment line after valid redirect'
+        outputter.out(path, lineNr, start, end, line, msg)
+        return True
+    return False
+
+_detectRedirect = re.compile(r'#REDIRECT(\s*)(?P<name>.*)')
+def detectRedirect(outputter, path, lineNr, line, firstDirectiveLine
+, validRedirectPresent):
+    match = _detectRedirect.match(line)
+    if match:
+        if firstDirectiveLine:
+            name = match.group('name')
+            if not name:
+                msg = 'Redirect without target'
+                outputter.out(path, lineNr, 0, len(line), line, msg)
+            else:
+                validRedirectPresent = True
+        else:
+            msg = 'Redirect in non-first line'
+            outputter.out(path, lineNr, 0, len(line), line, msg)
+        return validRedirectPresent, True
+    return validRedirectPresent, False
+
+def detectUseModIndent(outputter, path, lineNr, line):
+    if line[0:1] != ':' or detectSmilie(line, 0):
+        return False
+    end = len(line) - len(line.lstrip(';'))
+    outputter.out(path, lineNr, 0, end, line, 'UseMod indentation')
+    return True
+
+def detectUseModDefinitionList(outputter, path, lineNr, line):
+    if line[0:1] != ';' or detectSmilie(line, 0):
+        return False
+    outputter.out(path, lineNr, 0, 1, line, 'UseMod definition list')
+    return True
+
+_detectUseModTagsRe = re.compile(r'''<(?P<close>[/]?)
+(?P<name>(b|i|nowiki|pre|toc|tt))
+>''', re.IGNORECASE | re.VERBOSE)
+def detectUseModTags(outputter, path, lineNr, line):
+    matches = _detectUseModTagsRe.finditer(line)
+    for match in matches:
+        start = match.start()
+        end = match.end()
+        closing = match.group('close')
+        tagName = match.group('name').lower()
+        tagType = 'close' if closing else 'open'
+        msg = 'UseMod tag {0} {1}'.format(tagName, tagType)
+        outputter.out(path, lineNr, start, end, line, msg)
+    return False
+
+_checkBrTagsRe = re.compile(r'''
+(?P<open><[<`]*)
+(?P<name>br)
+(?P<close>[>`]*>)
+''', re.IGNORECASE | re.VERBOSE)
+def checkBrTags(outputter, path, lineNr, line):
+    """
+    UseMod forced linebreak: <br>
+    MoinMoin forced linebreak: <<BR>>
+    """
+    matches = _checkBrTagsRe.finditer(line)
+    for match in matches:
+        start = match.start()
+        end = match.end()
+        tagOpen = match.group('open')
+        tagName = match.group('name')
+        tagClose = match.group('close')
+        if (tagOpen == '<') and (tagClose == '>'):
+            msg = 'UseMod forced linebreak'
+            outputter.out(path, lineNr, start, end, line, msg)
+            return True
+        if ((tagOpen == '<<') and (tagClose[0:2] == '>>')
+        and (tagName != 'BR')):
+            msg = 'Invalid MoinMoin forced linebreak'
+            outputter.out(path, lineNr, start, end, line, msg)
+            return True
+    return False
+
+_checkHeadlinesRe = re.compile(r'''
+(?P<spaceBeforOpen>\s*) # Illegal.
+(?P<openTag>[=]+) # Headline open tag.
+(?P<spaceAfterOpen>\s*) # Required.
+(?P<nIndicator>[\#*]*)\s* # Numbering from old wiki.
+(?P<text>.*?) # Required headline text (non-greedy).
+(?P<spaceBeforClose>\s*) # Required.
+(?P<closeTag>[=]*) # Has to be same as open tag.
+(?P<spaceAfterClose>\s*) # Illegal trailing whitespace.
+$''', re.VERBOSE)
+def checkHeadlines(outputter, path, lineNr, line):
+    match = _checkHeadlinesRe.match(line)
+    if match is None:
+        return False
+    spaceBeforOpen = match.group('spaceBeforOpen')
+    openTag = match.group('openTag')
+    openTagStart = match.start('openTag')
+    openTagEnd = match.end('openTag')
+    spaceAfterOpen = match.group('spaceAfterOpen')
+    nIndicator = match.group('nIndicator')
+    text = match.group('text')
+    spaceBeforClose = match.group('spaceBeforClose')
+    closeTag = match.group('closeTag')
+    spaceAfterClose = match.group('spaceAfterClose')
+    if spaceBeforOpen:
+        end = len(spaceBeforOpen)
+        msg = 'Headline after whitespace'
+        outputter.out(path, lineNr, 0, end, line, msg)
+    if len(openTag) > 5:
+        start = openTagStart
+        end = openTagEnd
+        msg = 'Headline of level > 5'
+        outputter.out(path, lineNr, start, end, line, msg)
+    if text:
+        iMatches = re.finditer(r"[`']{2,}", text)
+        for iMatch in iMatches:
+            start = match.start('text') + iMatch.start()
+            end = match.start('text') + iMatch.end()
+            msg = 'Headline contains markup'
+            outputter.out(path, lineNr, start, end, line, msg)
+    else:
+        end = len(line)
+        start = openTagEnd - 1
+        msg = 'Headline contains no text'
+        outputter.out(path, lineNr, start, end, line, msg)
+        return True
+    if not spaceAfterOpen:
+        if nIndicator:
+            start = match.start('nIndicator')
+        else:
+            start = match.start('text')
+        msg = 'Headline without whitespace after open tag'
+        outputter.out(path, lineNr, start, start + 1, line, msg)
+    if nIndicator:
+        start = match.start('nIndicator')
+        end = match.end('nIndicator')
+        msg = 'Headline with UseMod numbering indicator'
+        outputter.out(path, lineNr, start, end, line, msg)
+    if closeTag:
+        if len(openTag) != len(closeTag):
+            start = match.start('closeTag')
+            end = match.end('closeTag')
+            msg = ('Headline with different length open and close'
+            + ' tags')
+            outputter.out(path, lineNr, start, end, line, msg)
+        if not spaceBeforClose:
+            start = match.start('closeTag')
+            msg = 'Headline without whitespace before close tag'
+            outputter.out(path, lineNr, start, start + 1, line, msg)
+        if spaceAfterClose:
+            start = match.start('spaceAfterClose')
+            end = match.end('spaceAfterClose')
+            msg = 'Headline ends with whitespace'
+            outputter.out(path, lineNr, start, end, line, msg)
+    else:
+        msg = 'Headline without close tag'
+        outputter.out(path, lineNr, len(line)-1, len(line), line, msg)
+        # Skip following checks when no close tag present.
+    return True
+
+_checkLinksRe = re.compile(r'''
+(?P<openBrackets>\[[\[`]*) # Valid links got 2 brackets
+(?P<openQuote>"?) # Artifact from old wiki conversion
+\s*
+(?P<linkUrl>.*?) # Link URL (not greedy)
+\s*
+(?P<closeQuote>"?) # Artifact from old wiki conversion
+(?P<closeBrackets>[\]`]*\]) # Valid links got 2 brackets
+''', re.IGNORECASE | re.VERBOSE)
+def checkLinks(outputter, path, lineNr, line):
+    matches = _checkLinksRe.finditer(line)
+    for match in matches:
+        start = match.start()
+        end = match.end()
+        openBrackets = match.group('openBrackets')
+        openQuote = match.group('openQuote')
+        linkUrl = match.group('linkUrl')
+        if openQuote:
+            msg = 'Fail-converted unnamed internal UseMod link'
+            outputter.out(path, lineNr, start, end, line, msg)
+            continue
+        if (len(openBrackets) == 1) and re.search(r':', linkUrl):
+            msg = 'Fail-converted external UseMod link'
+            outputter.out(path, lineNr, start, end, line, msg)
+            continue
+    return False
+
+_detectUseModUploadsRe = re.compile(r'(^|\s)(?P<link>upload:\S+)(\s|$)', re.I)
+def detectUseModUploads(outputter, path, lineNr, line):
+    matches = _detectUseModUploadsRe.finditer(line)
+    for match in matches:
+        start = match.start('link')
+        end = match.end('link')
+        msg = 'UseMod upload link'
+        outputter.out(path, lineNr, start, end, line, msg)
+    return False
+
+def checkFile(escaper, outputter, path):
+
+    # Read file and report broken UTF-8 encoding:
+    with open(path, 'rb') as file:
+        textBytes = file.read()
+    decoder = codecs.getincrementaldecoder('utf-8')()
+    lines, line, invalidEncoding = [], [], False
+    lastI = len(textBytes) + 1
+    for i in range(0, len(textBytes)):
+        try:
+            cp = decoder.decode(textBytes[i:i+1], i == lastI)
+            if len(cp) != 0:
+                if cp == '\n':
+                    if line[-1:] == ['\r']:
+                        del line[-1]
+                    lines.append(''.join(line))
+                    line = []
+                else:
+                    line.append(cp)
+        except ValueError:
+            invalidEncoding = True
+            lineNr, cpIndex = len(lines) + 1, len(line)
+            lineStr = ''.join(line)
+            msg = 'UTF-8 invalid byte while decoding line!'
+            outputter.out(path, lineNr, cpIndex, cpIndex + 1, lineStr, msg)
+            break
+    if invalidEncoding:
+        return
+    lines.append(''.join(line))
+
+    firstDirectiveLine = 1
+    validRedirectPresent = False
+    for lineNr, line in enumerate(lines):
+        isComment = line.startswith('##')
+        isDirective = not isComment and line.startswith('#')
+
+        checkForInvalidCodePoints(escaper, outputter, path, lineNr
+        , line)
+
+        isDirective, isComment = checkForUseModList(outputter, path
+        , lineNr, line, isDirective, isComment)
+
+        # No further wiki syntax checks for comments:
+        if isComment:
+            continue
+
+        # Determine first directive line
+        if (firstDirectiveLine == lineNr) and isComment:
+            firstDirectiveLine += 1
+
+        # Detect extra non-comment markup after valid redirect:
+        if validRedirectPresent and not isDirective:
+            skipRemaining = detectNonCommentAfterRedirect(outputter, path
+            , lineNr, line)
+            if skipRemaining:
+                continue
+
+        validRedirectPresent, skipRemaining = detectRedirect(outputter, path
+        , lineNr, line, firstDirectiveLine, validRedirectPresent)
+        if skipRemaining:
+            continue
+
+        if isDirective:
+            # Skip other directives.
+            continue
+
+        for checkFun in (
+            detectUseModIndent,
+            detectUseModDefinitionList,
+            detectUseModTags,
+            checkBrTags,
+            checkHeadlines,
+            checkLinks,
+            detectUseModUploads,
+        ):
+            skipRemaining = checkFun(outputter, path, lineNr, line)
+            if skipRemaining:
+                continue
+
 def main():
     o = sys.stdout
-    e = TextEscaper()
+    escaper = TextEscaper()
     if o.isatty() and (platform.system() != 'Windows'):
         d = AnsiTextDecorator()
         import subprocess
@@ -245,9 +571,8 @@ def main():
     else:
         d = dummyTextDecorator()
         cols = 80
-    ao = AnomalyOutputter(o, e, d)
-    ao.maxPartLength = cols - 11
-    rec = ReCache()
+    outputter = AnomalyOutputter(o, escaper, d)
+    outputter.maxPartLength = cols - 11
     fileCount = 0
     blistedCount = 0
     try:
@@ -260,311 +585,22 @@ def main():
                 blistedCount += 1
                 continue
             fileCount += 1
-
-            # Read file and report broken UTF-8 encoding:
-            with open(path, 'rb') as file:
-                textBytes = file.read()
-            decoder = codecs.getincrementaldecoder('utf-8')()
-            lines, line, invalidEncoding = [], [], False
-            lastI = len(textBytes) + 1
-            for i in range(0, len(textBytes)):
-                try:
-                    cp = decoder.decode(textBytes[i:i+1], i == lastI)
-                    if len(cp) != 0:
-                        if cp == '\n':
-                            if line[-1:] == ['\r']:
-                                del line[-1]
-                            lines.append(''.join(line))
-                            line = []
-                        else:
-                            line.append(cp)
-                except ValueError:
-                    invalidEncoding = True
-                    lineNr, cpIndex = len(lines) + 1, len(line)
-                    lineStr = ''.join(line)
-                    msg = r'UTF-8 invalid byte while decoding line!'
-                    ao.out(path, lineNr, cpIndex, cpIndex + 1, lineStr, msg)
-                    break
-            if invalidEncoding:
-                continue
-            lines.append(''.join(line))
-
-            firstDirectiveLine = 1
-            validRedirectPresent = False
-            for lineNr, line in enumerate(lines):
-                commentLine = line.startswith('##')
-                directiveLine = not commentLine and line.startswith('#')
-
-                # Obscure code points:
-                markAllowed = False
-                for cpIndex, cp in enumerate(line):
-                    anomaly = True
-                    unexpectedMark = False
-                    cpCat = unicodedata.category(cp)
-                    cpCatMain = cpCat[0]
-
-                    # Don't report letters, numbers, punctuation, symbols,
-                    # whitespace and some miscategorized whitespace:
-                    if cpCatMain in 'LNPSZ' or cp in (
-                        '\t',
-                        '\xad', # SOFT HYPHEN, category Cf
-                        '\u200d', # ZERO WIDTH JOINER, category Cf
-                        '\u200e', # LEFT-TO-RIGHT MARK, category Cf
-                        None
-                    ):
-                        anomaly = False
-
-                    # But report REPLACEMENT CHARACTER from category So, because
-                    # it most likely is a character set conversion artifact:
-                    if cp == r'�':
-                        anomaly = True
-
-                    # Don't report marks following letters or other marks:
-                    if cpCatMain == 'M':
-                        if markAllowed:
-                            anomaly = False
-                        else:
-                            # Not in letter cluster.
-                            anomaly, unexpectedMark = True, True
-                    elif cpCatMain == 'L':
-                        markAllowed = True
-                    else:
-                        markAllowed = False
-
-                    if anomaly:
-                        cpName = unicodedata.name(cp, r'unnamed')
-                        if unexpectedMark:
-                            suffix = ' not preceded by a letter'
-                        else:
-                            suffix = ''
-                        msg = r'Unicode {0} ({1}, category {2}){3}'
-                        msg = msg.format(e.escape(cp), cpName, cpCat, suffix)
-                        ao.out(path, lineNr, cpIndex, cpIndex + 1, line, msg)
-
-                # Old-wiki-style lists:
-                match = rec.match(r'(\*|#(\*|#(\*|#)))[*#]*', line)
-                if match:
-                    directiveLine = False
-                    commentLine = False
-                    start = match.start()
-                    end = match.end()
-                    ao.out(path, lineNr, start, end, line, 'Old wiki list')
-
-                # No further wiki syntax checks for comments or after valid
-                # redirects:
-                if commentLine:
-                    continue
-
-                # Determine first directive line
-                if (firstDirectiveLine == lineNr) and commentLine:
-                    firstDirectiveLine += 1
-
-                # Detect extra non-comment markup after valid redirect:
-                if validRedirectPresent and not directiveLine:
-                    match = rec.match(r'\s*(\S.*?)\s*$', line)
-                    if match:
-                        start = match.start(1)
-                        end = match.end(1)
-                        msg = 'Non-empty non-comment line after valid redirect'
-                        ao.out(path, lineNr, start, end, line, msg)
-                        continue
-
-                # Detect redirects:
-                match = rec.match(r'#REDIRECT(\s*)(?P<name>.*)', line)
-                if match:
-                    if firstDirectiveLine:
-                        name = match.group(r'name')
-                        if not name:
-                            msg = 'Redirect without target'
-                            ao.out(path, lineNr, 0, len(line), line, msg)
-                        else:
-                            validRedirectPresent = True
-                    else:
-                        msg = 'Redirect in non-first line'
-                        ao.out(path, lineNr, 0, len(line), line, msg)
-                    continue
-
-                # Skip other directives:
-                if directiveLine:
-                    continue
-
-                # Old-wiki-style features dependent on first char of line:
-                match = rec.match(r'''^(?P<firstChar>[:;])((?P<extraChars>[:;]*)
-                    |($|[^-\(\{\[\|\)\}\]pPD] # Do not match smilies.
-                    ))''', line, re.VERBOSE)
-                if match:
-                    firstChar = match.group(r'firstChar')
-                    extraCount = len(match.group(r'extraChars'))
-                    end = 1 + extraCount
-                    if firstChar == r':':
-                        msg = 'Old wiki indenting'
-                        ao.out(path, lineNr, 0, end, line, msg)
-                        continue
-                    if firstChar == r';':
-                        msg = 'Old wiki definition list'
-                        ao.out(path, lineNr, 0, end, line, msg)
-                        continue
-
-                # Old wiki tags:
-                matches = rec.finditer(r'''<(?P<close>[/]?)(?P<name>(
-                    b|i|nowiki|pre|toc|tt
-                    ))>''', line, re.IGNORECASE | re.VERBOSE)
-                for match in matches:
-                    start = match.start()
-                    end = match.end()
-                    closing = match.group(r'close')
-                    tagName = match.group(r'name')
-                    tagType = 'close' if closing else 'open'
-                    msg = 'Old wiki tag {0} {1}'.format(tagName, tagType)
-                    ao.out(path, lineNr, start, end, line, msg)
-
-                # <<BR>> tags (old and new):
-                matches = rec.finditer(r'''
-                    (?P<open><[<`]*)
-                    (?P<name>br)
-                    (?P<close>[>`]*>)
-                    ''', line, re.IGNORECASE | re.VERBOSE)
-                for match in matches:
-                    start = match.start()
-                    end = match.end()
-                    tagOpen = match.group('open')
-                    tagName = match.group('name')
-                    tagClose = match.group('close')
-                    if (tagOpen == '<') and (tagClose == '>'):
-                        msg = 'Old wiki linebreak'
-                        ao.out(path, lineNr, start, end, line, msg)
-                        continue
-                    if ((tagOpen == '<<') and (tagClose[0:2] == '>>')
-                    and (tagName != 'BR')):
-                        msg = 'Invalid linebreak'
-                        ao.out(path, lineNr, start, end, line, msg)
-                        continue
-
-                # Headlines:
-                matches = rec.finditer(r'''^
-                    (?P<spaceBeforOpen>\s*) # Illegal.
-                    (?P<openTag>[=]+) # Headline open tag.
-                    (?P<spaceAfterOpen>\s*) # Required.
-                    (?P<nIndicator>[\#*]*)\s* # Numbering from old wiki.
-                    (?P<text>.*?) # Required headline text (non-greedy).
-                    (?P<spaceBeforClose>\s*) # Required.
-                    (?P<closeTag>[=]*) # Has to be same as open tag.
-                    (?P<spaceAfterClose>\s*) # Illegal trailing whitespace.
-                    $''', line, re.VERBOSE)
-                for match in matches:
-                    spaceBeforOpen = match.group('spaceBeforOpen')
-                    openTag = match.group('openTag')
-                    openTagStart = match.start('openTag')
-                    openTagEnd = match.end('openTag')
-                    spaceAfterOpen = match.group('spaceAfterOpen')
-                    nIndicator = match.group('nIndicator')
-                    text = match.group('text')
-                    spaceBeforClose = match.group('spaceBeforClose')
-                    closeTag = match.group('closeTag')
-                    spaceAfterClose = match.group('spaceAfterClose')
-                    if spaceBeforOpen:
-                        end = len(spaceBeforOpen)
-                        msg = 'Headline starts with whitespace'
-                        ao.out(path, lineNr, 0, end, line, msg)
-                    if len(openTag) > 5:
-                        start = openTagStart
-                        end = openTagEnd
-                        msg = 'Headline of level > 5'
-                        ao.out(path, lineNr, start, end, line, msg)
-                    if text:
-                        iMatches = rec.finditer(r"[`']{2,}", text)
-                        for iMatch in iMatches:
-                            start = match.start('text') + iMatch.start()
-                            end = match.start('text') + iMatch.end()
-                            msg = 'Headline text contains markup'
-                            ao.out(path, lineNr, start, end, line, msg)
-                    else:
-                        end = len(line)
-                        start = openTagEnd - 1
-                        msg = 'Headline contains no text'
-                        ao.out(path, lineNr, start, end, line, msg)
-                        continue
-                    if not spaceAfterOpen:
-                        if nIndicator:
-                            start = match.start('nIndicator')
-                        else:
-                            start = match.start('text')
-                        msg = 'Headline without whitespace after open tag'
-                        ao.out(path, lineNr, start, start + 1, line, msg)
-                    if nIndicator:
-                        start = match.start('nIndicator')
-                        end = match.end('nIndicator')
-                        msg = 'Headline with old numbering indicator'
-                        ao.out(path, lineNr, start, end, line, msg)
-                    if not closeTag:
-                        msg = 'Headline without close tag'
-                        ao.out(path, lineNr, len(line)-1, len(line), line, msg)
-                        # Skip following checks when no close tag present.
-                        continue
-                    if len(openTag) != len(closeTag):
-                        start = match.start('closeTag')
-                        end = match.end('closeTag')
-                        msg = ('Headline with different length open and close'
-                        + ' tags')
-                        ao.out(path, lineNr, start, end, line, msg)
-                    if not spaceBeforClose:
-                        start = match.start('closeTag')
-                        msg = 'Headline without whitespace before close tag'
-                        ao.out(path, lineNr, start, start + 1, line, msg)
-                    if spaceAfterClose:
-                        start = match.start('spaceAfterClose')
-                        end = match.end('spaceAfterClose')
-                        msg = 'Headline ends with whitespace'
-                        ao.out(path, lineNr, start, end, line, msg)
-
-                # Links:
-                matches = rec.finditer(r'''
-                    (?P<openBrackets>\[[\[`]*) # Valid links got 2 brackets
-                    (?P<openQuote>"?) # Artifact from old wiki conversion
-                    \s*
-                    (?P<linkUrl>.*?) # Link URL (not greedy)
-                    \s*
-                    (?P<closeQuote>"?) # Artifact from old wiki conversion
-                    (?P<closeBrackets>[\]`]*\]) # Valid links got 2 brackets
-                    ''', line, re.IGNORECASE | re.VERBOSE)
-                for match in matches:
-                    start = match.start()
-                    end = match.end()
-                    openBrackets = match.group('openBrackets')
-                    openQuote = match.group('openQuote')
-                    linkUrl = match.group('linkUrl')
-                    if openQuote:
-                        msg = 'Fail-converted unnamed internal link'
-                        ao.out(path, lineNr, start, end, line, msg)
-                        continue
-                    if (len(openBrackets) == 1) and rec.search(r':', linkUrl):
-                        msg = 'Fail-converted external link'
-                        ao.out(path, lineNr, start, end, line, msg)
-                        continue
-
-                # Old wiki uploads:
-                reStr = r'(^|\s)(?P<link>upload:\S+)(\s|$)'
-                matches = rec.finditer(reStr, line, re.I)
-                for match in matches:
-                    start = match.start('link')
-                    end = match.end('link')
-                    msg = 'Old wiki upload link'
-                    ao.out(path, lineNr, start, end, line, msg)
+            checkFile(escaper, outputter, path)
 
     except KeyboardInterrupt:
         o.write('\nProcessing interrupted by user!\n')
 
     eFileCount = d.decorateText(str(fileCount), d.textBYellow)
     eBlistedCount = d.decorateText(str(blistedCount), d.textBYellow)
-    if ao.anomalyCount:
-        eAnomalyCount = d.decorateText(str(ao.anomalyCount), d.textBYellow)
-        eLineCount = d.decorateText(str(ao.lineCount), d.textBYellow)
-        ePathCount = d.decorateText(str(ao.pathCount), d.textBYellow)
+    if outputter.anomalyCount:
+        eAnomalyCount = d.decorateText(str(outputter.anomalyCount), d.textBYellow)
+        eLineCount = d.decorateText(str(outputter.lineCount), d.textBYellow)
+        ePathCount = d.decorateText(str(outputter.pathCount), d.textBYellow)
         msg = ('\nFound {0} anomalies in {1} lines from {2} files'
         + ' ({3} scanned, {4} excluded):\n')
         o.write(msg.format(eAnomalyCount, eLineCount, ePathCount, eFileCount
         , eBlistedCount))
-        anomalyCounts = ao.anomalyCounts
+        anomalyCounts = outputter.anomalyCounts
         maxValue = sorted(anomalyCounts.values())[-1]
         maxValueLen = len(str(maxValue))
         keys = sorted(anomalyCounts.keys())
