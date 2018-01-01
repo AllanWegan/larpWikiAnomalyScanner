@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import time
 import re
 import glob
 import os
@@ -8,6 +9,9 @@ import sys
 import unicodedata
 import urllib.parse
 import codecs
+import queue
+from multiprocessing import Process, Event, Queue
+from collections import Counter
 
 baseDir = os.path.dirname(__file__)
 
@@ -22,34 +26,30 @@ class AnomalyFormatter:
     The text buffer is returned and erased by getText().
     Also counts found anomalies.
     """
-    qoute = '"'
-    ellipsis = '…'
-    sol = '|'
-    eol = '|'
-    maxPartLength = 70
-    minAfterLength = 20
 
-    pathCount = 0
-    lineCount = 0
-    anomalyCount = 0
-    anomalyCounts = dict()
-    lastPath = ''
-    lastLineNr = 0
-
-    def __init__(self, textEscaper, textDecorator):
+    def __init__(self, textEscaper, textDecorator, maxPartLength=70):
         self._buffer = []
         self._escaper = textEscaper
         self._decorator = textDecorator
+        self.maxPartLength = maxPartLength
+        self.qoute = '"'
+        self.ellipsis = '…'
+        self.sol = '|'
+        self.eol = '|'
+        self.minAfterLength = 20
+        self.counts = Counter()
+        self._lastPath = ''
+        self._lastLineNr = 0
 
     def out(self, path, lineNr, startColumn, endColumn, line, anomaly):
         b = self._buffer
-        e = self._escaper
         d = self._decorator
         q = self.qoute
-        if self.lastPath != path:
-            self.lastPath = path
-            self.pathCount += 1
-            ePath = d.decorateText(e.escape(path), d.textBCyan)
+        if self._lastPath != path:
+            self._lastPath = path
+            self._lastLineNr = 0
+            self.counts['pathCount'] += 1
+            ePath = d.decorateText(self._escaper.escape(path), d.textBCyan)
             pageName = os.path.basename(path).replace(' - ', '/')
             if pageName[-4:] == '.txt':
                 pageName = pageName[0:-4]
@@ -57,23 +57,20 @@ class AnomalyFormatter:
             eUrl = d.decorateText(url, d.textWhite)
             b.extend(('\n', ePath, ':\n'))
             b.extend(('  ', eUrl, '\n'))
-        if self.lastLineNr != lineNr:
-            if self.lastLineNr != lineNr:
-                self.lineCount += 1
-                self.lastLineNr = lineNr
+        if self._lastLineNr != lineNr:
+            if self._lastLineNr != lineNr:
+                self.counts['lineCount'] += 1
+                self._lastLineNr = lineNr
             eLineNr = d.decorateText(str(lineNr + 1), d.textBYellow)
             b.extend(('  Line ', eLineNr, ':\n'))
-        self.anomalyCount += 1
-        if anomaly not in self.anomalyCounts:
-            self.anomalyCounts[anomaly] = 1
-        else:
-            self.anomalyCounts[anomaly] += 1
+        self.counts['anomalyCount'] += 1
+        self.counts[anomaly] += 1
         eColumn = d.decorateText(str(startColumn + 1), d.textBYellow)
 
         ml = self.maxPartLength
 
         # Extract as much of the anomaly as allowed and selected:
-        t = e.escapeLimitRight(line[startColumn:endColumn], ml)
+        t = self._escaper.escapeLimitRight(line[startColumn:endColumn], ml)
         part = t[0]
         partCpLength = t[1]
         partComplete = ((endColumn - startColumn - partCpLength) == 0)
@@ -85,14 +82,14 @@ class AnomalyFormatter:
         else:
             mal = 0
         bLength = min(startColumn, ml - mal)
-        t = e.escapeLimitLeft(line[:startColumn], bLength)
+        t = self._escaper.escapeLimitLeft(line[:startColumn], bLength)
         before = t[0]
         beforeCpLength = t[1]
         ml = max(0, ml - len(before))
 
         # Extract as much of trailing text as available and quota left:
         if partComplete:
-            t = e.escapeLimitRight(line[endColumn:], ml)
+            t = self._escaper.escapeLimitRight(line[endColumn:], ml)
             after = t[0]
             afterCpLength = t[1]
         else:
@@ -117,6 +114,11 @@ class AnomalyFormatter:
         text = ''.join(self._buffer)
         self._buffer = []
         return text
+
+    def getCounts(self):
+        counts = self.counts
+        self.counts = Counter()
+        return counts
 
 class AnsiTextDecorator:
     """
@@ -156,10 +158,15 @@ class AnsiTextDecorator:
         codesStr = ''.join(('\x1B[' + code + 'm' for code in codes))
         return '{0}{1}\x1B[0m'.format(codesStr, text)
 
-class dummyTextDecorator(AnsiTextDecorator):
+class DummyTextDecorator(AnsiTextDecorator):
 
     def decorateText(self, text, *codes):
         return text
+
+def makeTextDecorator(useAnsi=False):
+    if useAnsi:
+        return AnsiTextDecorator()
+    return DummyTextDecorator()
 
 class TextEscaper:
     """
@@ -465,76 +472,111 @@ def detectUseModUploads(outputter, path, lineNr, line):
 def detectMoinMoinComment(outputter, path, lineNr, line):
     return line.startswith('##')
 
-def checkFile(escaper, outputter, path, checkFuns):
+def makeCheckFile(checkFuns, cols, useAnsi):
+    escaper = TextEscaper()
+    decorator = makeTextDecorator(useAnsi)
+    maxPartLength = cols - 11
+    outputter = AnomalyFormatter(escaper, decorator, maxPartLength)
 
-    # Read file and report broken UTF-8 encoding:
-    with open(path, 'rb') as file:
-        textBytes = file.read()
-    decoder = codecs.getincrementaldecoder('utf-8')()
-    lines, line, invalidEncoding = [], [], False
-    lastI = len(textBytes) + 1
-    for i in range(0, len(textBytes)):
+    def checkFile(path):
+
+        # Read file and report broken UTF-8 encoding:
+        with open(path, 'rb') as file:
+            textBytes = file.read()
+        decoder = codecs.getincrementaldecoder('utf-8')()
+        lines, line, invalidEncoding = [], [], False
+        lastI = len(textBytes) + 1
+        for i in range(0, len(textBytes)):
+            try:
+                cp = decoder.decode(textBytes[i:i+1], i == lastI)
+                if len(cp) != 0:
+                    if cp == '\n':
+                        if line[-1:] == ['\r']:
+                            del line[-1]
+                        lines.append(''.join(line))
+                        line = []
+                    else:
+                        line.append(cp)
+            except ValueError:
+                invalidEncoding = True
+                lineNr, cpIndex = len(lines) + 1, len(line)
+                lineStr = ''.join(line)
+                msg = 'UTF-8 invalid byte while decoding line!'
+                outputter.out(path, lineNr, cpIndex, cpIndex + 1, lineStr, msg)
+                break
+        if invalidEncoding:
+            return outputter.getText(), tuple(outputter.getCounts().items())
+        lines.append(''.join(line))
+
+        firstDirectiveLine = 1
+        validRedirectPresent = False
+        for lineNr, line in enumerate(lines):
+            isComment = detectMoinMoinComment(outputter, path, lineNr, line)
+            isDirective = not isComment and line.startswith('#')
+
+            checkForInvalidCodePoints(escaper, outputter, path, lineNr
+            , line)
+
+            isDirective, isComment = checkForUseModList(outputter, path
+            , lineNr, line, isDirective, isComment)
+
+            # No further wiki syntax checks for comments:
+            if isComment:
+                continue
+
+            # Determine first directive line
+            if (firstDirectiveLine == lineNr) and isComment:
+                firstDirectiveLine += 1
+
+            # Detect extra non-comment markup after valid redirect:
+            if validRedirectPresent and not isDirective:
+                skipRemaining = detectNonCommentAfterRedirect(outputter, path
+                , lineNr, line)
+                if skipRemaining:
+                    continue
+
+            validRedirectPresent, skipRemaining = detectRedirect(outputter, path
+            , lineNr, line, firstDirectiveLine, validRedirectPresent)
+            if skipRemaining:
+                continue
+
+            if isDirective:
+                # Skip other directives.
+                continue
+
+            for checkFun in checkFuns:
+                skipRemaining = checkFun(outputter, path, lineNr, line)
+                if skipRemaining:
+                    continue
+
+        return outputter.getText(), tuple(outputter.getCounts().items())
+
+    return checkFile
+
+def workerProc(termE:Event, jobs:Queue, results:Queue, workerFactory, *args):
+    try:
+        workFun = workerFactory(*args)
+        while not termE.is_set():
+            try:
+                job = jobs.get(True, 0.02)
+            except queue.Empty:
+                continue
+            result = job, workFun(job)
+            results.put(result, True)
+    except KeyboardInterrupt:
+        pass
+
+def handleResults(results:Queue, counts:Counter):
+    while True:
         try:
-            cp = decoder.decode(textBytes[i:i+1], i == lastI)
-            if len(cp) != 0:
-                if cp == '\n':
-                    if line[-1:] == ['\r']:
-                        del line[-1]
-                    lines.append(''.join(line))
-                    line = []
-                else:
-                    line.append(cp)
-        except ValueError:
-            invalidEncoding = True
-            lineNr, cpIndex = len(lines) + 1, len(line)
-            lineStr = ''.join(line)
-            msg = 'UTF-8 invalid byte while decoding line!'
-            outputter.out(path, lineNr, cpIndex, cpIndex + 1, lineStr, msg)
-            break
-    if invalidEncoding:
-        return
-    lines.append(''.join(line))
-
-    firstDirectiveLine = 1
-    validRedirectPresent = False
-    for lineNr, line in enumerate(lines):
-        isComment = detectMoinMoinComment(outputter, path, lineNr, line)
-        isDirective = not isComment and line.startswith('#')
-
-        checkForInvalidCodePoints(escaper, outputter, path, lineNr
-        , line)
-
-        isDirective, isComment = checkForUseModList(outputter, path
-        , lineNr, line, isDirective, isComment)
-
-        # No further wiki syntax checks for comments:
-        if isComment:
-            continue
-
-        # Determine first directive line
-        if (firstDirectiveLine == lineNr) and isComment:
-            firstDirectiveLine += 1
-
-        # Detect extra non-comment markup after valid redirect:
-        if validRedirectPresent and not isDirective:
-            skipRemaining = detectNonCommentAfterRedirect(outputter, path
-            , lineNr, line)
-            if skipRemaining:
-                continue
-
-        validRedirectPresent, skipRemaining = detectRedirect(outputter, path
-        , lineNr, line, firstDirectiveLine, validRedirectPresent)
-        if skipRemaining:
-            continue
-
-        if isDirective:
-            # Skip other directives.
-            continue
-
-        for checkFun in checkFuns:
-            skipRemaining = checkFun(outputter, path, lineNr, line)
-            if skipRemaining:
-                continue
+            job, (rText, rCounts) = results.get(False)
+        except queue.Empty:
+            return
+        counts['fileCount'] += 1
+        if len(rText) != 0:
+            print(rText, end='')
+        for name, count in rCounts:
+            counts[name] += count
 
 def main():
     checkFuns = (
@@ -546,25 +588,29 @@ def main():
         checkLinks,
         detectUseModUploads,
     )
-
-    o = sys.stdout
-    escaper = TextEscaper()
-    if o.isatty() and (platform.system() != 'Windows'):
-        d = AnsiTextDecorator()
+    if sys.stdout.isatty() and (platform.system() != 'Windows'):
         import subprocess
         cols = int(subprocess.Popen(('tput', 'cols'),
             stdout=subprocess.PIPE).stdout.read())
         if cols <= 0:
             cols = 80
+        useAnsi = True
     else:
-        d = dummyTextDecorator()
-        cols = 80
-    outputter = AnomalyFormatter(escaper, d)
-    outputter.maxPartLength = cols - 11
-    fileCount = 0
+        cols, useAnsi = 80, False
+
+    workerCount = max(1, len(os.sched_getaffinity(0)))
+    termE = Event()
+    jobs = Queue(maxsize=2*workerCount)
+    results = Queue(maxsize=2*workerCount)
+    workerArgs = termE, jobs, results, makeCheckFile, checkFuns, cols, useAnsi
+    workerPool = [Process(target=workerProc, args=workerArgs)
+        for _ in range(0, workerCount)]
+    for worker in workerPool:
+        worker.start()
+    counts = Counter()
     blistedCount = 0
     try:
-        print('Scanning files...', file=o)
+        print('Scanning files...')
         paths = glob.iglob(os.path.join(sourceDir, "*.txt"))
         for path in paths:
             if not os.path.isfile(path):
@@ -572,39 +618,54 @@ def main():
             if path in blacklist:
                 blistedCount += 1
                 continue
-            fileCount += 1
-            checkFile(escaper, outputter, path, checkFuns)
-            text = outputter.getText()
-            if len(text) != 0:
-                print(text, end='', file=o)
-
+            while True:
+                handleResults(results, counts)
+                try:
+                    jobs.put(path, True, 0.02)
+                    break
+                except queue.Full:
+                    pass
+        while not jobs.empty():
+            handleResults(results, counts)
+            time.sleep(0.02)
     except KeyboardInterrupt:
-        print('', file=o)
-        print('Processing interrupted by user!', file=o)
+        print('')
+        print('Processing interrupted by user!')
+    termE.set()
+    while any(worker.is_alive() for worker in workerPool):
+        handleResults(results, counts)
+        time.sleep(0.02)
+    for worker in workerPool:
+        worker.join()
+    handleResults(results, counts)
 
-    eFileCount = d.decorateText(str(fileCount), d.textBYellow)
-    eBlistedCount = d.decorateText(str(blistedCount), d.textBYellow)
-    if outputter.anomalyCount:
-        eAnomalyCount = d.decorateText(str(outputter.anomalyCount), d.textBYellow)
-        eLineCount = d.decorateText(str(outputter.lineCount), d.textBYellow)
-        ePathCount = d.decorateText(str(outputter.pathCount), d.textBYellow)
+    decorator = makeTextDecorator(useAnsi)
+    fileCount, anomalyCount = counts['fileCount'], counts['anomalyCount']
+    pathCount, lineCount = counts['pathCount'], counts['lineCount']
+    del counts['fileCount']
+    del counts['anomalyCount']
+    del counts['pathCount']
+    del counts['lineCount']
+    eFileCount = decorator.decorateText(str(fileCount), decorator.textBYellow)
+    eBlistedCount = decorator.decorateText(str(blistedCount), decorator.textBYellow)
+    if anomalyCount != 0:
+        eAnomalyCount = decorator.decorateText(str(anomalyCount), decorator.textBYellow)
+        eLineCount = decorator.decorateText(str(lineCount), decorator.textBYellow)
+        ePathCount = decorator.decorateText(str(pathCount), decorator.textBYellow)
         msg = ('Found {0} anomalies in {1} lines from {2} files'
         + ' ({3} scanned, {4} excluded):')
-        print('', file=o)
+        print('')
         print(msg.format(eAnomalyCount, eLineCount, ePathCount, eFileCount
-        , eBlistedCount), file=o)
-        anomalyCounts = outputter.anomalyCounts
-        maxValue = sorted(anomalyCounts.values())[-1]
-        maxValueLen = len(str(maxValue))
-        keys = sorted(anomalyCounts.keys())
-        for key in keys:
-            eCount = '{0:{1}}'.format(anomalyCounts[key], maxValueLen)
-            eCount = d.decorateText(eCount, d.textBYellow)
-            print('  {0}  {1}'.format(eCount, key), file=o)
+        , eBlistedCount))
+        maxValueLen = len(str(max(counts.values())))
+        for name, count in sorted(counts.items()):
+            eCount = '{0:{1}}'.format(count, maxValueLen)
+            eCount = decorator.decorateText(eCount, decorator.textBYellow)
+            print('  {0}  {1}'.format(eCount, name))
     else:
         msg = 'Found no anomalies in {0} files ({1} excluded).'
-        print('', file=o)
-        print(msg.format(fileCount, eBlistedCount), file=o)
+        print('')
+        print(msg.format(fileCount, eBlistedCount))
 
 if __name__ == '__main__':
     main()
