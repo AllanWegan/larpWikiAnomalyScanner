@@ -77,3 +77,7 @@ __V1__ has been released December 2012.
 __V2__, released December 2017, was a maintenance release and fixed a crash
 when encountering broken UTF-8 by implementing byte-wise parsing of UTF-8 and
 proper reporting. Also, the tool moved to a GIT repository and Github.
+
+__V3__, released January 2018, improved performance a lot. Multiprocessing got
+implemented and some slow code has been rewritten.
+Refactorings leading to better changeability began.
