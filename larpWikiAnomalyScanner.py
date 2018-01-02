@@ -431,6 +431,16 @@ def checkHeadlines(outputter, path, lineNr, line):
         # Skip following checks when no close tag present.
     return True
 
+_detectUseModAnchorsRe = re.compile(r'(?:^|[^[])(\[#[^#\]]+\])(?:$|[^]])')
+def detectUseModAnchors(outputter, path, lineNr, line):
+    matches = _detectUseModAnchorsRe.finditer(line)
+    for match in matches:
+        start = match.start(1)
+        end = match.end(1)
+        msg = 'UseMod anchor'
+        outputter.out(path, lineNr, start, end, line, msg)
+    return False
+
 _checkLinksRe = re.compile(r'''
 (?P<openBrackets>\[[\[`]*) # Valid links got 2 brackets
 (?P<openQuote>"?) # Artifact from old wiki conversion
@@ -586,6 +596,7 @@ def main():
         checkBrTags,
         checkHeadlines,
         checkLinks,
+        detectUseModAnchors,
         detectUseModUploads,
     )
     if sys.stdout.isatty() and (platform.system() != 'Windows'):
