@@ -298,7 +298,7 @@ def detectRedirect(outputter, path, lineNr, line, firstDirectiveLine
 def detectUseModIndent(outputter, path, lineNr, line):
     if line[0:1] != ':' or detectSmilie(line, 0):
         return False
-    end = len(line) - len(line.lstrip(';'))
+    end = len(line) - len(line.lstrip(':'))
     outputter.out(path, lineNr, 0, end, line, 'UseMod indentation')
     return True
 
