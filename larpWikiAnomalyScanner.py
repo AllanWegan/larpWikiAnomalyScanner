@@ -196,7 +196,7 @@ class TextEscaper:
         return textEsc, len(text)
 
 _detectSmilieRe = re.compile(r'''(?:^|(?<=\s))
-[:;,8B][-~]?[)}\]|({[pPD][=\#]?
+[:;,8B][-~]?(?:[)}\]|({[]{1,2}|[pPD])[=\#]?
 (?:\s|$)''', re.VERBOSE)
 def detectSmilie(line, offset):
     """
